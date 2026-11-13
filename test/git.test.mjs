@@ -290,7 +290,7 @@ test("background fetch uses the pinned arguments and is throttled", async () => 
   await source.sync();
   await source.idle();
   const fetches = () => fake.calls.filter((c) => c.args[0] === "fetch");
-  assert.deepEqual(fetches()[0].args, ["fetch", "--quiet", "--no-tags", "--prune", "origin"]);
+  assert.deepEqual(fetches()[0].args, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--prune", "origin"]);
   await source.sync(true);
   await source.idle();
   assert.equal(fetches().length, 1);
@@ -395,6 +395,7 @@ test("pull fetches then fast-forwards only", async () => {
   const fetchAt = subs.findIndex((a) => a[0] === "fetch");
   const mergeAt = subs.findIndex((a) => a[0] === "merge");
   assert.ok(fetchAt >= 0 && mergeAt > fetchAt);
+  assert.deepEqual(subs[fetchAt], ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules"]);
   assert.deepEqual(subs[mergeAt], ["merge", "--ff-only", "@{upstream}"]);
 });
 
@@ -986,7 +987,7 @@ test("the background fetch runs for a clean repo and manual pull still works for
   const source = realSource(clean.dir, clean.env, fetches);
   await source.sync();
   await source.idle();
-  assert.deepEqual(fetches[0], ["fetch", "--quiet", "--no-tags", "--prune", "origin"]);
+  assert.deepEqual(fetches[0], ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--prune", "origin"]);
   assert.equal(source.snapshot().hint, null);
 
   const flagged = await realRepo();

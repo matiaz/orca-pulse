@@ -612,7 +612,7 @@ export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => f
         }
         if (busy) return;
         fetchedAt.set(cur.path, now());
-        const result = await git(cur.path, ["fetch", "--quiet", "--no-tags", "--prune", "origin"], { timeoutMs: FETCH_TIMEOUT_MS });
+        const result = await git(cur.path, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--prune", "origin"], { timeoutMs: FETCH_TIMEOUT_MS });
         if (gen !== generation) return;
         fetchFailure = result.code === 0 ? null : { error: clean(`fetch failed: ${errorLine(result.stderr || result.stdout)}`), hint: null };
       } catch (error) {
@@ -893,7 +893,7 @@ export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => f
       return run("pull", async (cur) => {
         if (!cur.status.upstream) throw new Error("no upstream branch");
         if (fetchPending) await fetchPending;
-        await ok(cur.path, ["fetch", "--quiet", "--no-tags"], { timeoutMs: FETCH_TIMEOUT_MS });
+        await ok(cur.path, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules"], { timeoutMs: FETCH_TIMEOUT_MS });
         fetchedAt.set(cur.path, now());
         const after = parsePorcelain(await ok(cur.path, STATUS_ARGS));
         if (after.behind > 0) await ok(cur.path, ["merge", "--ff-only", "@{upstream}"], { timeoutMs: WRITE_TIMEOUT_MS });
