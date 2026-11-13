@@ -2,20 +2,32 @@ import { clean, isGithubUrl } from "../lib/sanitize.mjs";
 import { createTerminalMap } from "../lib/terminal-map.mjs";
 import { isLocal, matchFocused, resolveWorkspaceId } from "../lib/workspaces.mjs";
 import { addDays } from "../lib/days.mjs";
+import { createReviewStore } from "../lib/review-store.mjs";
 import { git as execGit } from "../lib/exec.mjs";
 import { resolveRemotes as defaultResolveRemotes, startReview as defaultStartReview } from "../sources/review.mjs";
 import { copyToClipboard } from "./clipboard.mjs";
+import { canMerge, mergeKey, pickMerge, pickReview, scopePulls } from "./automation.mjs";
 import { createScheduler } from "./scheduler.mjs";
 import { buildSnapshot, startOfDay } from "./snapshot.mjs";
 import { statusSummary } from "./status.mjs";
 import { KEPT_CODES, MAX_OFFSET, friendlyError, invalid, parseCommit, parseNone, parsePath, parseShift, parseSource, parseUrl, parseWorkspaceId } from "./validate.mjs";
 
-const DEFAULTS = {
+export const DEFAULTS = {
   "claude.planLimits": true,
   "heatmap.defaultSource": "github",
   "notifications.prs": true,
   "git.aiMessages": true,
   "claude.configDir": "",
+  "pulls.scope": "open",
+  "reviews.auto": true,
+  "reviews.autoApprove": false,
+  "reviews.autoMerge": false,
+  "reviews.mergeMethod": "squash",
+  "reviews.loopMinutes": 10,
+};
+const CHOICES = {
+  "pulls.scope": ["workspace", "open", "all"],
+  "reviews.mergeMethod": ["squash", "merge", "rebase"],
 };
 const SETTINGS_EVERY_MS = 5000;
 const POST_EVERY_MS = 500;
@@ -26,6 +38,8 @@ const REFRESH_COOLDOWN_MS = 3000;
 const MAX_NOTIFICATIONS = 5;
 const MAX_CANDIDATES = 100;
 const MAX_TERMINALS = 50;
+const PANEL_FIELDS = ["url", "repo", "number", "title", "action", "isDraft", "author", "updatedAt", "mine"];
+const METHOD_NAMES = { squash: "squash merging", merge: "merge commits", rebase: "rebase merging" };
 
 function busyError(message) {
   const error = new Error(message);
@@ -72,7 +86,9 @@ export function createPulse(orca, deps) {
   const subscriptions = [];
   const settings = new Map(Object.entries(DEFAULTS));
   const setting = (key) => settings.get(key);
-  const { pulls, github, claude, limits, git } = deps.createSources(setting);
+  const choice = (key) => (CHOICES[key].includes(setting(key)) ? setting(key) : DEFAULTS[key]);
+  const flag = (key) => (typeof setting(key) === "boolean" ? setting(key) : DEFAULTS[key]);
+  const { pulls, github, claude, limits, git, merge } = deps.createSources(setting);
 
   const log = (message) => {
     try {
@@ -106,6 +122,7 @@ export function createPulse(orca, deps) {
   let remotesAt = -Infinity;
   let truncatedLogged = false;
   const reviewing = new Set();
+  const reviews = createReviewStore({ readJson: deps.readJson, writeJson: deps.writeJson, now });
   const terminalMap = createTerminalMap({ readJson: deps.readJson, writeJson: deps.writeJson, now });
   const terminalKey = () => (context?.terminals ?? []).slice().sort().join(",");
 
@@ -166,13 +183,34 @@ export function createPulse(orca, deps) {
     return { via: focusVia, workspaceId: focusedId, candidates };
   }
 
+  function panelItem(item) {
+    const out = {};
+    for (const key of PANEL_FIELDS) out[key] = item[key];
+    const note = reviews.get(item.url)?.mergeError;
+    if (note) out.note = note;
+    return out;
+  }
+
+  const scoped = (items) => scopePulls(items.filter((item) => item.listed !== false), { scope: choice("pulls.scope"), workspaces, remotes, focusedId });
+
+  function scopedPulls() {
+    const snapshot = pulls.snapshot();
+    const { items, scope } = scoped(snapshot.items);
+    return { ...snapshot, items, scope };
+  }
+
+  function pullsView() {
+    const view = scopedPulls();
+    return { ...view, items: view.items.map(panelItem) };
+  }
+
   function currentSnapshot() {
     return buildSnapshot({
       view: { source: currentSource(), offset: view.offset },
       github: github.snapshot(),
       claude: claude.snapshot(),
       limits: limits.snapshot(),
-      pulls: pulls.snapshot(),
+      pulls: pullsView(),
       git: git.snapshot(),
       focus: focusView(),
       now: now(),
@@ -219,7 +257,7 @@ export function createPulse(orca, deps) {
 
   async function updateStatusBar() {
     if (disposed || !hasHost("statusBar.update")) return;
-    const summary = statusSummary(pulls.snapshot(), limits.snapshot());
+    const summary = statusSummary(scopedPulls(), limits.snapshot());
     const json = JSON.stringify(summary);
     if (json === lastStatus) return;
     try {
@@ -230,23 +268,80 @@ export function createPulse(orca, deps) {
     }
   }
 
+  async function alert(title, body) {
+    if (setting("notifications.prs") === false || !hasHost("notifications.show")) return;
+    try {
+      await orca.host.call("notifications.show", { title, body: clean(body, 200) });
+    } catch (error) {
+      logError("notify", error);
+    }
+  }
+
   async function notify(notable) {
     if (!Array.isArray(notable) || !notable.length) return;
-    if (setting("notifications.prs") === false || !hasHost("notifications.show")) return;
-    for (const item of notable.slice(0, MAX_NOTIFICATIONS)) {
-      const title = item.action === "merge" ? "Ready to merge" : "CI failed";
-      const body = clean(`${item.repo}#${item.number} ${item.title}`, 200);
+    for (const item of scoped(notable).items.slice(0, MAX_NOTIFICATIONS)) {
+      await alert(item.action === "merge" ? "Ready to merge" : "CI failed", `${item.repo}#${item.number} ${item.title}`);
+    }
+  }
+
+  async function autoReview(items) {
+    if (!flag("reviews.auto")) return;
+    const pr = pickReview(items, { workspaces, remotes, store: reviews });
+    if (!pr || reviewing.has(pr.url)) return;
+    reviewing.add(pr.url);
+    reviews.record(pr.url);
+    try {
+      await startReview({ host: orca.host, pr, focusedId, workspaces, remotes, autoApprove: flag("reviews.autoApprove"), loopMinutes: setting("reviews.loopMinutes"), fallback: false });
+      await alert("Review started", `Pulse started reviewing ${pr.repo}#${pr.number}`);
+    } catch (error) {
+      reviews.update(pr.url, { launchError: clean(error?.message ?? error, 200) || "launch failed" });
+      log(`auto review: ${clean(error?.message ?? error, 120)}`);
+    } finally {
+      reviewing.delete(pr.url);
+    }
+  }
+
+  async function autoMerge(items) {
+    if (!flag("reviews.autoMerge")) return;
+    const method = choice("reviews.mergeMethod");
+    const pr = pickMerge(items, reviews, method);
+    if (!pr) return;
+    const { pr: fresh, allowed } = await merge.check(pr);
+    if (!canMerge(fresh, reviews.get(pr.url), method)) return;
+    const key = mergeKey(fresh, method);
+    if (allowed?.[method] !== true) {
+      reviews.update(pr.url, { mergeError: `Not merged: this repository does not allow ${METHOD_NAMES[method]}`, mergeKey: key });
+      return;
+    }
+    const label = `${pr.repo}#${pr.number}`;
+    try {
+      await merge.merge(fresh, method);
+      reviews.update(pr.url, { mergeError: null, mergeKey: key });
+      await alert("Pull request merged", `Pulse merged ${label}`);
+    } catch (error) {
+      const message = clean(error?.message ?? error, 200) || "merge failed";
+      reviews.update(pr.url, { mergeError: `Merge failed: ${message}`, mergeKey: key });
+      await alert("Merge failed", `${label}: ${message}`);
+    }
+  }
+
+  async function automate() {
+    const items = pulls.snapshot().items;
+    reviews.seen(items.map((item) => item.url));
+    for (const [label, work] of [["auto review", autoReview], ["auto merge", autoMerge]]) {
       try {
-        await orca.host.call("notifications.show", { title, body });
+        await work(items);
       } catch (error) {
-        logError("notify", error);
+        logError(label, error);
       }
     }
   }
 
   async function syncPulls(force = false) {
     const result = await pulls.sync(force);
+    if (result?.fetched) await refreshRemotes(false);
     await notify(result?.notable);
+    if (result?.fetched) await automate();
     await updateStatusBar();
     emit();
   }
@@ -418,7 +513,8 @@ export function createPulse(orca, deps) {
       reviewing.add(item.url);
       try {
         await refreshRemotes(false);
-        const result = await startReview({ host: orca.host, pr: item, focusedId, workspaces, remotes });
+        const result = await startReview({ host: orca.host, pr: item, focusedId, workspaces, remotes, autoApprove: flag("reviews.autoApprove"), loopMinutes: setting("reviews.loopMinutes") });
+        reviews.record(item.url);
         return { started: true, workspaceId: result.workspaceId };
       } finally {
         reviewing.delete(item.url);

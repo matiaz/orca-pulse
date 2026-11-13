@@ -20,7 +20,7 @@ Pulse is a `trusted-worker` Orca plugin. Its worker runs as a separate Node.js p
 
 - A compromised local `git`, `gh`, `claude` or `security` binary, or anyone who can write to a folder on your `PATH`. The worker appends `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin` to `PATH`.
 - A compromised Orca host, another malicious plugin, or an already compromised user account.
-- What a Claude Code agent does after you start a **review**, beyond the instructions Pulse gives it (see [Claude](#claude)).
+- What a Claude Code agent does after a **review** starts, by hand or automatically, beyond the instructions Pulse gives it (see [Claude](#claude)).
 
 ## Measures
 
@@ -72,15 +72,28 @@ Pulse is a `trusted-worker` Orca plugin. Its worker runs as a separate Node.js p
 
 - State lives in `$XDG_STATE_HOME/orca-pulse` (default `~/.local/state/orca-pulse`). The folder is created `0700` and refused if it is a symlink or owned by another user.
 - Files are written `0600` through an exclusively created temporary file and an atomic rename. File names must match `^[\w-][\w.-]*\.json$`.
+- `reviews.json` is re-validated on load: only GitHub PR URLs, numeric times and sanitized error text are kept, and a PR's entry is dropped 14 days after it was last seen in the PR list.
 
 ### Claude
 
 - **Plan limits** are on by default and can be turned off in settings. When on, the OAuth token is read on demand for each request (macOS keychain via `/usr/bin/security`, scoped to your account name, or `.credentials.json` in the Claude config folder on other platforms), must be printable ASCII up to 4096 characters, is sent only to `https://api.anthropic.com/api/oauth/usage` with redirects refused and a 10 s timeout, and is never written to disk or logged. Only the usage percentages are cached.
 - **message** and **create pr** run `claude -p --model haiku --tools "" --setting-sources "" --strict-mcp-config --no-session-persistence --disable-slash-commands` in Pulse's private temp folder, with the diff on stdin and a system prompt that treats it as untrusted data. Secret-looking paths are excluded and the diff is capped at 24,000 characters. The filter goes by file name only: secrets inside other files are not detected, so they would be sent.
 - **Transcripts** are read only as `.jsonl` files under `<claude config folder>/projects`; symlinks are skipped, files are opened with `O_NOFOLLOW`, and line, file and depth limits apply.
-- **review** calls Orca's `agent.launch` with only a workspace id, the agent `claude` and a prompt built from the validated PR URL and the owner, repository and number parsed from it. The PR's title, body and author never go into the prompt. The prompt tells the agent to treat all PR content as untrusted data, never as instructions.
-- **The review agent acts under your GitHub account.** It posts reviews, inline comments, change requests and approvals with your logged-in `gh`, and for someone else's PR with a change request it keeps a `/loop 30m` follow-up running in that Claude Code session until it approves or the PR is merged or closed. The prompt gates approval on GitHub state: every review thread you started must be resolved or answered, and the PR must have new commits or every point must have been answered without a code change. Deciding whether a reply or a commit really fixes an issue is still the agent's judgment, and it reads attacker-controlled PR content (code, descriptions, comments, replies) to make it. The prompt reduces the prompt-injection risk; it does not eliminate it. A crafted PR could still talk the agent into an approval or into running a command.
+- **review** calls Orca's `terminal.create` with a workspace id, a title and the command `claude '<prompt>'`. The prompt is one single-quoted shell argument with embedded quotes escaped (tested against `/bin/sh`), and it is built from the validated PR URL and the owner, repository and number parsed from it. The PR's title, body and author never go into the prompt. The prompt tells the agent to treat all PR content as untrusted data, never as instructions.
+- **The review agent acts under your GitHub account.** It posts reviews, inline comments, change requests and approvals with your logged-in `gh`, and for someone else's PR with a change request it keeps a `/loop` follow-up running (every 10 minutes by default, set by `reviews.loopMinutes`) in that Claude Code session until it approves or the PR is merged or closed. The prompt gates approval on GitHub state: every review thread you started must be resolved or answered, and the PR must have new commits or every point must have been answered without a code change. Deciding whether a reply or a commit really fixes an issue is still the agent's judgment, and it reads attacker-controlled PR content (code, descriptions, comments, replies) to make it. The prompt reduces the prompt-injection risk; it does not eliminate it. A crafted PR could still talk the agent into an approval or into running a command.
 - The agent runs with your normal Claude Code permission mode and settings. Pulse grants no pre-approved tools, so Claude Code asks according to your settings; if you run Claude Code with permissions bypassed, nothing is asked. Check its permission requests before approving them, and close the session to stop a follow-up loop.
+- **Let reviews approve** (`reviews.autoApprove`, off by default) decides whether the agent may approve. When off, the prompt tells it to request changes or leave a "No issues found." comment review, never to approve and never to start the follow-up loop. The prompt never asks the agent to merge and tells it never to merge.
+
+### Auto review and auto merge
+
+- **Auto review** (`reviews.auto`) is **on by default**. Any PR that requests your review, in a repository that is the `origin` of a local Orca workspace, is read by a Claude Code agent **without a click**: anyone who can request your review on such a repository can put content in front of the agent. The same prompt applies, with the PR content marked as untrusted data, and the same prompt-injection caveat. Drafts, your own PRs, PRs you already reviewed and PRs Pulse already started a review for are skipped, and at most one review starts per refresh. The review runs only in a workspace whose `origin` matches the PR's repository, never in the focused workspace as a fallback. Turn it off if you do not want this.
+- **Auto merge** (`reviews.autoMerge`) is **off by default**. The worker merges, never the agent. It merges only a PR that:
+  - Pulse started a review for (recorded in `reviews.json`);
+  - GitHub reports as approved, with your own latest review an approval of the current head commit;
+  - GitHub reports as cleanly mergeable (`mergeStateStatus` `CLEAN`, so branch protection and required reviews are satisfied), with the head commit's checks rollup `SUCCESS`. PRs without checks are not merged.
+- Right before merging, the worker fetches the PR again with a GraphQL query whose owner, name and number are passed as variables, and re-checks every condition. It then runs `gh pr merge <url> --squash|--merge|--rebase --match-head-commit <sha>`, so GitHub refuses the merge if the head moved after the check. The method comes from a fixed list; any other setting value falls back to `squash`. It never passes `--admin` (no bypassing branch protection or merge queues) and never `--delete-branch`.
+- A failed merge is not retried until the head commit, the merge state or the method changes. If the repository does not allow the chosen method, nothing is merged.
+- With approve on, auto merge relies on the agent's approval, which comes from reading untrusted PR content. Turn on both only for repositories whose contributors you trust, or keep approve off and approve by hand.
 
 ### Other
 

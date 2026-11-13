@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPulse } from "../src/worker/pulse.mjs";
+import fs from "node:fs";
+import { createPulse, DEFAULTS } from "../src/worker/pulse.mjs";
 
 const URL1 = "https://github.com/acme/app/pull/7";
 
@@ -16,13 +17,23 @@ function fakeSources(state) {
       sync: async () => {
         const notable = state.notable ?? [];
         state.notable = [];
-        return { notable };
+        return { notable, fetched: state.fetched ?? true };
       },
       snapshot: () => ({ items: state.items, updatedAt: "2026-11-10T00:00:00.000Z", error: null, hint: null }),
     },
     github: { sync: async () => {}, snapshot: () => ({ login: "me", days: {}, updatedAt: null, error: null, hint: null }) },
     claude: { sync: async () => {}, snapshot: () => ({ days: {}, updatedAt: null, error: null, hint: null }) },
     limits: { sync: async () => ({ enabled: false }), snapshot: () => ({ enabled: false }) },
+    merge: {
+      check: async (pr) => {
+        calls.push(["check", pr.url]);
+        return { pr: { ...pr, state: "OPEN", ...(state.fresh ?? {}) }, allowed: state.allowed ?? { squash: true, merge: true, rebase: true } };
+      },
+      merge: async (pr, method) => {
+        calls.push(["merge", pr.url, method, pr.headRefOid]);
+        if (state.mergeFails) throw new Error(state.mergeFails);
+      },
+    },
     git: {
       setRoot: (value) => calls.push(["setRoot", value]),
       sync: async () => {},
@@ -53,9 +64,10 @@ function harness({ hostCall, state = { items: [makePull()] }, extra = {} } = {})
   const timers = { intervals: [], timeouts: [], cleared: [] };
   const clock = { now: 1_000_000 };
   const sources = fakeSources(state);
+  const launches = [];
   const orca = {
     log: (message) => logs.push(message),
-    settings: { get: async (key) => (extra.settings ?? {})[key] },
+    settings: { get: async (key) => ({ "pulls.scope": "all", ...(extra.settings ?? {}) })[key] },
     panels: { handle: (name, fn) => handlers.set(name, fn), post: (name, payload) => posts.push([name, payload]) },
     events: { on: (name, fn) => (events.set(name, fn), { dispose: () => disposed.push(name) }) },
     commands: { register: (id, fn) => (commands.set(id, fn), { dispose: () => disposed.push(id) }) },
@@ -91,13 +103,15 @@ function harness({ hostCall, state = { items: [makePull()] }, extra = {} } = {})
     },
     startReview: async (args) => {
       hostCalls.push(["review", args.pr.url]);
+      launches.push(args);
+      if (state.launchFails) throw new Error(state.launchFails);
       return { workspaceId: "w1" };
     },
     resolveRemotes: async () => ({}),
     copyText: async () => true,
     ...extra.deps,
   });
-  return { pulse, handlers, events, commands, posts, logs, hostCalls, disposed, timers, clock, sources, state };
+  return { pulse, handlers, events, commands, posts, logs, hostCalls, disposed, timers, clock, sources, state, launches };
 }
 
 const settle = async () => {
@@ -492,5 +506,252 @@ test("workspace.changed handler keeps working when agent events throw", async ()
   const h = ambiguous();
   await h.pulse.start();
   assert.doesNotThrow(() => h.events.get("agent.status.changed")({ get terminalId() { throw new Error("x"); } }));
+  h.pulse.dispose();
+});
+
+test("manifest settings and worker DEFAULTS agree", () => {
+  const manifest = JSON.parse(fs.readFileSync(new URL("../orca-plugin.json", import.meta.url), "utf8"));
+  const settings = manifest.contributes.settings;
+  assert.deepEqual(settings.map((entry) => entry.key).sort(), Object.keys(DEFAULTS).sort());
+  for (const entry of settings) {
+    assert.deepEqual(entry.default, DEFAULTS[entry.key], entry.key);
+    if (entry.enum) {
+      assert.ok(entry.enum.includes(entry.default), entry.key);
+      assert.equal(entry.enumLabels?.length, entry.enum.length, entry.key);
+    }
+  }
+  assert.equal(DEFAULTS["reviews.auto"], true);
+  assert.equal(DEFAULTS["reviews.autoApprove"], false);
+  assert.equal(DEFAULTS["reviews.autoMerge"], false);
+  assert.equal(DEFAULTS["reviews.mergeMethod"], "squash");
+  assert.equal(DEFAULTS["pulls.scope"], "open");
+  assert.equal(DEFAULTS["reviews.loopMinutes"], 10);
+});
+
+const HEAD = "a".repeat(40);
+const appWs = [{ id: "w1", name: "app", path: "/repo/app", branch: "main", hostId: null }];
+const requested = (number, extra = {}) => makePull({ url: `https://github.com/acme/app/pull/${number}`, number, action: "review", mine: false, author: "bob", requested: true, viewerReview: null, ...extra });
+const mergeable = (extra = {}) => requested(7, { action: "merge", requested: false, headRefOid: HEAD, reviewDecision: "APPROVED", viewerReview: { state: "APPROVED", oid: HEAD }, mergeStateStatus: "CLEAN", checks: "SUCCESS", ...extra });
+
+function auto({ items, settings = {}, stored = {}, state = {} } = {}) {
+  const writes = [];
+  const h = harness({
+    state: { items, ...state },
+    hostCall: async (method) => {
+      if (method === "workspace.list") return { workspaces: appWs, truncated: false };
+      if (method === "workspace.readContext") return null;
+      return { ok: true };
+    },
+    extra: {
+      settings: { "pulls.scope": "open", ...settings },
+      deps: {
+        resolveRemotes: async () => ({ "/repo/app": "Acme/App" }),
+        readJson: (name, fallback) => (name === "reviews.json" ? { entries: stored } : fallback),
+        writeJson: (name, value) => writes.push([name, structuredClone(value)]),
+      },
+    },
+  });
+  h.writes = writes;
+  h.poll = async () => {
+    h.clock.now += 10_000;
+    await h.pulse.forceAll();
+    await settle();
+  };
+  h.shown = () => h.hostCalls.filter(([name]) => name === "notifications.show").map(([, params]) => params);
+  h.stored = () => h.writes.filter(([name]) => name === "reviews.json").at(-1)?.[1].entries ?? {};
+  return h;
+}
+
+test("the snapshot is filtered by scope and carries it", async () => {
+  const items = [requested(7, { headRefOid: HEAD }), makePull({ url: "https://github.com/other/x/pull/8", repo: "other/x", number: 8 })];
+  const h = auto({ items, settings: { "reviews.auto": false } });
+  await h.pulse.start();
+  const snapshot = await h.handlers.get("pulse.snapshot")();
+  assert.deepEqual(snapshot.pulls.items.map((item) => item.number), [7]);
+  assert.deepEqual(snapshot.pulls.scope, { mode: "open", reason: null });
+  assert.equal("headRefOid" in snapshot.pulls.items[0], false);
+  h.pulse.dispose();
+
+  const none = auto({ items, settings: { "reviews.auto": false, "pulls.scope": "workspace" } });
+  await none.pulse.start();
+  const empty = await none.handlers.get("pulse.snapshot")();
+  assert.deepEqual(empty.pulls.items, []);
+  assert.deepEqual(empty.pulls.scope, { mode: "workspace", reason: "no-workspace" });
+  none.pulse.dispose();
+
+  const junk = auto({ items, settings: { "reviews.auto": false, "pulls.scope": "everything" } });
+  await junk.pulse.start();
+  assert.equal((await junk.handlers.get("pulse.snapshot")()).pulls.scope.mode, "open");
+  junk.pulse.dispose();
+});
+
+test("notifications use the scoped list", async () => {
+  const outside = makePull({ url: "https://github.com/other/x/pull/8", repo: "other/x", number: 8 });
+  const inside = makePull({ url: "https://github.com/acme/app/pull/9", number: 9 });
+  const h = auto({ items: [inside, outside], state: { notable: [outside, inside] } });
+  await h.pulse.start();
+  await settle();
+  const shown = h.shown();
+  assert.equal(shown.length, 1);
+  assert.match(shown[0].body, /acme\/app#9/);
+  h.pulse.dispose();
+});
+
+test("auto review launches one requested PR per poll in its matching workspace", async () => {
+  const h = auto({ items: [requested(7), requested(8), requested(9, { isDraft: true })] });
+  await h.pulse.start();
+  await settle();
+  assert.equal(h.launches.length, 1);
+  assert.equal(h.launches[0].pr.number, 7);
+  assert.equal(h.launches[0].fallback, false);
+  assert.equal(h.launches[0].autoApprove, false);
+  assert.equal(h.launches[0].loopMinutes, 10);
+  assert.deepEqual(h.shown().map((params) => params.body), ["Pulse started reviewing acme/app#7"]);
+  assert.equal(typeof h.stored()["https://github.com/acme/app/pull/7"].startedAt, "number");
+  await h.poll();
+  assert.deepEqual(h.launches.map((args) => args.pr.number), [7, 8]);
+  await h.poll();
+  assert.equal(h.launches.length, 2);
+  h.pulse.dispose();
+});
+
+test("auto review waits for a successful fetch", async () => {
+  const h = auto({ items: [requested(7)], state: { fetched: false } });
+  await h.pulse.start();
+  await settle();
+  assert.equal(h.launches.length, 0);
+  h.pulse.dispose();
+});
+
+test("auto review records failures and does not retry them", async () => {
+  const h = auto({ items: [requested(7)], state: { launchFails: "agent unavailable" } });
+  await h.pulse.start();
+  await settle();
+  assert.equal(h.launches.length, 1);
+  assert.equal(h.stored()["https://github.com/acme/app/pull/7"].launchError, "agent unavailable");
+  assert.equal(h.shown().length, 0);
+  assert.ok(h.logs.some((line) => line.includes("agent unavailable")));
+  await h.poll();
+  assert.equal(h.launches.length, 1);
+  h.pulse.dispose();
+});
+
+test("auto review is off when the setting is off and notifications follow their setting", async () => {
+  const off = auto({ items: [requested(7)], settings: { "reviews.auto": false } });
+  await off.pulse.start();
+  await settle();
+  assert.equal(off.launches.length, 0);
+  off.pulse.dispose();
+  const quiet = auto({ items: [requested(7)], settings: { "notifications.prs": false, "reviews.autoApprove": true } });
+  await quiet.pulse.start();
+  await settle();
+  assert.equal(quiet.launches.length, 1);
+  assert.equal(quiet.launches[0].autoApprove, true);
+  assert.equal(quiet.shown().length, 0);
+  quiet.pulse.dispose();
+});
+
+test("the review button records into the store and passes the approve switch", async () => {
+  const h = auto({ items: [requested(7)], settings: { "reviews.auto": false, "reviews.autoApprove": true, "reviews.loopMinutes": 45 } });
+  await h.pulse.start();
+  await h.handlers.get("pulls.review")({ url: "https://github.com/acme/app/pull/7" });
+  assert.equal(h.launches.length, 1);
+  assert.equal(h.launches[0].autoApprove, true);
+  assert.equal(h.launches[0].loopMinutes, 45);
+  assert.equal(h.launches[0].fallback, undefined);
+  assert.ok(h.stored()["https://github.com/acme/app/pull/7"]);
+  h.pulse.dispose();
+});
+
+const reviewedEntry = { "https://github.com/acme/app/pull/7": { startedAt: 1, lastSeen: 1_000_000 } };
+const mergeCalls = (h) => h.sources.calls.filter(([name]) => name === "merge");
+
+test("auto merge re-checks, merges and notifies", async () => {
+  const h = auto({ items: [mergeable()], stored: reviewedEntry, settings: { "reviews.autoMerge": true, "reviews.mergeMethod": "rebase" } });
+  await h.pulse.start();
+  await settle();
+  assert.ok(h.sources.calls.some(([name]) => name === "check"));
+  assert.deepEqual(mergeCalls(h), [["merge", "https://github.com/acme/app/pull/7", "rebase", HEAD]]);
+  assert.deepEqual(h.shown().map((params) => params.body), ["Pulse merged acme/app#7"]);
+  await h.poll();
+  assert.equal(mergeCalls(h).length, 1);
+  h.pulse.dispose();
+
+  const junk = auto({ items: [mergeable()], stored: reviewedEntry, settings: { "reviews.autoMerge": true, "reviews.mergeMethod": "admin" } });
+  await junk.pulse.start();
+  await settle();
+  assert.equal(mergeCalls(junk)[0][2], "squash");
+  junk.pulse.dispose();
+});
+
+test("a reviewed PR no longer in the list is hidden but still merged", async () => {
+  const h = auto({ items: [mergeable({ listed: false })], stored: reviewedEntry, settings: { "reviews.autoMerge": true } });
+  await h.pulse.start();
+  await settle();
+  const snapshot = await h.handlers.get("pulse.snapshot")();
+  assert.deepEqual(snapshot.pulls.items, []);
+  assert.equal(mergeCalls(h).length, 1);
+  h.pulse.dispose();
+});
+
+test("auto merge is off by default and needs a Pulse review", async () => {
+  const off = auto({ items: [mergeable()], stored: reviewedEntry });
+  await off.pulse.start();
+  await settle();
+  assert.equal(off.sources.calls.some(([name]) => name === "check"), false);
+  off.pulse.dispose();
+  const unknown = auto({ items: [mergeable()], settings: { "reviews.autoMerge": true } });
+  await unknown.pulse.start();
+  await settle();
+  assert.equal(unknown.sources.calls.some(([name]) => name === "check"), false);
+  unknown.pulse.dispose();
+});
+
+test("auto merge does nothing when the fresh state is no longer ready", async () => {
+  const h = auto({ items: [mergeable()], stored: reviewedEntry, settings: { "reviews.autoMerge": true }, state: { fresh: { headRefOid: "c".repeat(40) } } });
+  await h.pulse.start();
+  await settle();
+  assert.equal(mergeCalls(h).length, 0);
+  assert.equal(h.stored()["https://github.com/acme/app/pull/7"].mergeError, undefined);
+  h.pulse.dispose();
+});
+
+test("auto merge stores the failure, shows it on the row and does not retry", async () => {
+  const h = auto({ items: [mergeable()], stored: reviewedEntry, settings: { "reviews.autoMerge": true }, state: { mergeFails: "base branch policy prohibits the merge" } });
+  await h.pulse.start();
+  await settle();
+  assert.equal(mergeCalls(h).length, 1);
+  const entry = h.stored()["https://github.com/acme/app/pull/7"];
+  assert.equal(entry.mergeError, "Merge failed: base branch policy prohibits the merge");
+  assert.equal(entry.mergeKey, `${HEAD}:CLEAN:squash`);
+  assert.deepEqual(h.shown().map((params) => params.title), ["Merge failed"]);
+  const row = (await h.handlers.get("pulse.snapshot")()).pulls.items[0];
+  assert.equal(row.note, "Merge failed: base branch policy prohibits the merge");
+  await h.poll();
+  assert.equal(mergeCalls(h).length, 1);
+  h.state.items = [mergeable({ headRefOid: "d".repeat(40), viewerReview: { state: "APPROVED", oid: "d".repeat(40) } })];
+  h.state.fresh = { headRefOid: "d".repeat(40), viewerReview: { state: "APPROVED", oid: "d".repeat(40) } };
+  await h.poll();
+  assert.equal(mergeCalls(h).length, 2);
+  h.pulse.dispose();
+});
+
+test("auto merge skips a disallowed method with a hint", async () => {
+  const h = auto({ items: [mergeable()], stored: reviewedEntry, settings: { "reviews.autoMerge": true }, state: { allowed: { squash: false, merge: true, rebase: true } } });
+  await h.pulse.start();
+  await settle();
+  assert.equal(mergeCalls(h).length, 0);
+  assert.match(h.stored()["https://github.com/acme/app/pull/7"].mergeError, /squash/i);
+  assert.match((await h.handlers.get("pulse.snapshot")()).pulls.items[0].note, /squash/i);
+  h.pulse.dispose();
+});
+
+test("review store entries are kept for PRs still listed", async () => {
+  const stored = { "https://github.com/acme/app/pull/7": { startedAt: 1, lastSeen: 1 }, "https://github.com/acme/app/pull/99": { startedAt: 1, lastSeen: -15 * 24 * 60 * 60 * 1000 } };
+  const h = auto({ items: [requested(7, { viewerReview: { state: "COMMENTED", oid: HEAD } })], stored });
+  await h.pulse.start();
+  await settle();
+  assert.deepEqual(Object.keys(h.stored()), ["https://github.com/acme/app/pull/7"]);
+  assert.equal(h.stored()["https://github.com/acme/app/pull/7"].lastSeen, h.clock.now);
   h.pulse.dispose();
 });

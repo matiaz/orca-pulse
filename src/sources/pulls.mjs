@@ -7,13 +7,16 @@ const SEARCHES = {
   authored: "is:pr is:open archived:false author:@me",
   assigned: "is:pr is:open archived:false assignee:@me",
   review: "is:pr is:open archived:false review-requested:@me",
+  reviewed: "is:pr is:open archived:false reviewed-by:@me",
 };
+const UNLISTED = new Set(["reviewed"]);
 const QUERY = `query {
   viewer { login }
   ${Object.entries(SEARCHES).map(([alias, q]) => `${alias}: search(query: "${q}", type: ISSUE, first: 50) { nodes { ...pr } }`).join("\n  ")}
 }
 fragment pr on PullRequest {
-  number title url isDraft updatedAt reviewDecision mergeable mergeStateStatus
+  number title url isDraft updatedAt reviewDecision mergeable mergeStateStatus headRefOid
+  viewerLatestReview { state commit { oid } }
   author { login }
   repository { nameWithOwner }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -21,6 +24,26 @@ fragment pr on PullRequest {
 
 export const ACTIONS = ["merge", "ci failed", "conflict", "changes", "update", "review", "ci running", "waiting", "draft"];
 const NOTABLE = new Set(["merge", "ci failed"]);
+const OID = /^[0-9a-f]{40}$/;
+const WORD = /^[A-Z_]{1,40}$/;
+
+const oidOf = (value) => (typeof value === "string" && OID.test(value) ? value : null);
+const wordOf = (value) => (typeof value === "string" && WORD.test(value) ? value : null);
+
+function reviewOf(review) {
+  const state = wordOf(review?.state);
+  return state ? { state, oid: oidOf(review?.oid) } : null;
+}
+
+export function mergeFields(pr) {
+  return {
+    headRefOid: oidOf(pr.headRefOid),
+    reviewDecision: wordOf(pr.reviewDecision),
+    mergeStateStatus: wordOf(pr.mergeStateStatus),
+    checks: wordOf(pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state),
+    viewerReview: reviewOf({ state: pr.viewerLatestReview?.state, oid: pr.viewerLatestReview?.commit?.oid }),
+  };
+}
 
 export function actionOf(pr, viewer) {
   if (pr.reviewRequested && pr.author?.login !== viewer) return "review";
@@ -58,10 +81,12 @@ function normalize(data) {
     for (const pr of data[alias]?.nodes ?? []) {
       if (!pr || !isPullUrl(pr.url) || !pr.repository || !Number.isSafeInteger(pr.number)) continue;
       const reviewRequested = alias === "review" || byUrl.get(pr.url)?.reviewRequested === true;
+      const listed = !UNLISTED.has(alias) || byUrl.get(pr.url)?.item.listed === true;
       const raw = { ...pr, reviewRequested };
       byUrl.set(pr.url, {
         reviewRequested,
         item: {
+          listed,
           url: pr.url,
           repo: clean(pr.repository.nameWithOwner),
           number: pr.number,
@@ -71,6 +96,8 @@ function normalize(data) {
           author: clean(pr.author?.login),
           updatedAt: clean(pr.updatedAt, 40),
           mine: pr.author?.login === viewer,
+          requested: reviewRequested,
+          ...mergeFields(pr),
         },
       });
     }
@@ -83,6 +110,7 @@ function revive(items) {
   return items
     .filter((it) => it && isPullUrl(it.url) && Number.isSafeInteger(it.number))
     .map((it) => ({
+      listed: it.listed !== false,
       url: it.url,
       repo: clean(it.repo),
       number: it.number,
@@ -92,6 +120,12 @@ function revive(items) {
       author: clean(it.author),
       updatedAt: clean(it.updatedAt, 40),
       mine: it.mine === true,
+      requested: it.requested === true,
+      headRefOid: oidOf(it.headRefOid),
+      reviewDecision: wordOf(it.reviewDecision),
+      mergeStateStatus: wordOf(it.mergeStateStatus),
+      checks: wordOf(it.checks),
+      viewerReview: reviewOf(it.viewerReview),
     }));
 }
 
@@ -124,17 +158,17 @@ export function createPulls({ gh, readJson, writeJson, now = Date.now }) {
       try {
         writeJson(CACHE_FILE, cache);
       } catch {}
-      return { notable };
+      return { notable, fetched: true };
     } catch (failure) {
       ({ error, hint } = describeError(failure));
-      return { notable: [] };
+      return { notable: [], fetched: false };
     }
   }
 
   return {
     sync(force = false) {
       if (pending) return pending;
-      if (!force && now() - attemptedAt < INTERVAL_MS) return Promise.resolve({ notable: [] });
+      if (!force && now() - attemptedAt < INTERVAL_MS) return Promise.resolve({ notable: [], fetched: false });
       pending = fetchOnce().finally(() => {
         pending = null;
       });

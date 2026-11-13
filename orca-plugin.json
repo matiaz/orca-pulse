@@ -25,13 +25,19 @@
       { "key": "heatmap.defaultSource", "title": "Heatmap source", "type": "string", "enum": ["github", "claude"], "enumLabels": ["GitHub contributions", "Claude cost"], "default": "github" },
       { "key": "notifications.prs", "title": "Notify on pull request changes", "description": "Desktop notification when a pull request becomes ready to merge or its CI fails.", "type": "boolean", "default": true },
       { "key": "git.aiMessages", "title": "AI commit and PR messages", "description": "Sends the staged diff (secret-looking files excluded, 24 KB max) to your local claude CLI when you press message or create pr.", "type": "boolean", "default": true },
-      { "key": "claude.configDir", "title": "Claude config folder", "description": "Leave empty to use ~/.claude.", "type": "string", "default": "" }
+      { "key": "claude.configDir", "title": "Claude config folder", "description": "Leave empty to use ~/.claude.", "type": "string", "default": "" },
+      { "key": "pulls.scope", "title": "Pull requests to show", "description": "Which pull requests the list shows, matched by each workspace's GitHub origin remote.", "type": "string", "enum": ["workspace", "open", "all"], "enumLabels": ["Focused workspace only", "Repositories open in Orca", "All repositories"], "default": "open" },
+      { "key": "reviews.auto", "title": "Review requested pull requests automatically", "description": "Starts the Claude review on its own when someone requests your review on a pull request whose repository is open in a local workspace. Claude reads the pull request without a click.", "type": "boolean", "default": true },
+      { "key": "reviews.autoApprove", "title": "Let reviews approve", "description": "When on, a clean review approves the pull request, and a change request starts a follow-up loop that approves once your feedback is addressed. When off, a clean review only leaves a comment and no follow-up starts.", "type": "boolean", "default": false },
+      { "key": "reviews.autoMerge", "title": "Merge pull requests Pulse reviewed", "description": "Merges a pull request Pulse reviewed once it is approved on its latest commit, your own approval is on that commit, checks pass and GitHub reports it ready. Never bypasses branch protection.", "type": "boolean", "default": false },
+      { "key": "reviews.mergeMethod", "title": "Merge method", "description": "How Pulse merges when automatic merging is on.", "type": "string", "enum": ["squash", "merge", "rebase"], "enumLabels": ["Squash and merge", "Create a merge commit", "Rebase and merge"], "default": "squash" },
+      { "key": "reviews.loopMinutes", "title": "Follow-up loop interval (minutes)", "description": "How often the follow-up loop checks a pull request you requested changes on, when Let reviews approve is on. Whole minutes from 1 to 1440.", "type": "integer", "minimum": 1, "maximum": 1440, "default": 10, "placeholder": "10" }
     ]
   },
   "capabilities": [
     { "kind": "workspace:read" },
     { "kind": "agent:read" },
-    { "kind": "agent:launch" },
+    { "kind": "terminal:send" },
     { "kind": "notifications:show" },
     { "kind": "settings:own" }
   ]

@@ -411,6 +411,18 @@ function shiftWeeks(weeks) {
   return act("activity", "heatmap.shift", { weeks });
 }
 
+const SCOPE_EMPTY = {
+  all: "Nothing waiting on you",
+  open: "Nothing waiting on you in open workspaces",
+  workspace: "Nothing waiting on you in this workspace",
+  "no-remote": "The focused workspace has no GitHub remote",
+  "no-workspace": "No focused workspace",
+};
+
+function emptyText(scope) {
+  return SCOPE_EMPTY[scope?.reason] ?? SCOPE_EMPTY[scope?.mode] ?? SCOPE_EMPTY.all;
+}
+
 function buildPulls() {
   const pulls = snapshot.pulls;
   const items = Array.isArray(pulls.items) ? pulls.items : [];
@@ -418,7 +430,7 @@ function buildPulls() {
   const { section, body } = shell("pulls", status || "loading…", pulls.error ? "error" : "");
   if (pulls.hint) body.append(noteLine(pulls.hint));
   if (!items.length) {
-    if (!pulls.error) body.append(noteLine("Nothing waiting on you"));
+    if (!pulls.error) body.append(noteLine(emptyText(pulls.scope)));
   } else {
     const list = h("ul", "prs");
     list.style.listStyle = "none";
@@ -442,6 +454,7 @@ function pullRow(item) {
   const author = String(item.author ?? "").replace(/\[bot\]$/, "");
   top.append(h("span", `badge sev-${SEVERITY[item.action] ?? "muted"}`, item.action), h("span", "pr-ref", `${repoName}#${item.number}`), h("span", "pr-author", author));
   main.append(top, h("span", "pr-title", item.title));
+  if (typeof item.note === "string" && item.note) main.append(h("span", "pr-note", item.note));
   main.addEventListener("click", () => openUrl(item.url, "pulls"));
   const actions = h("div", "pr-actions");
   const confirming = confirmUrl === item.url;

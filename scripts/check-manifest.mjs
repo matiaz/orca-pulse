@@ -6,7 +6,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const errors = [];
 const fail = (message) => errors.push(message);
 
-const ALLOWED_CAPABILITIES = ["workspace:read", "agent:read", "agent:launch", "notifications:show", "settings:own"];
+const ALLOWED_CAPABILITIES = ["workspace:read", "agent:read", "terminal:send", "notifications:show", "settings:own"];
 const KNOWN_EVENTS = ["workspace.created", "workspace.removed", "workspace.changed", "agent.status.changed", "editor.typography.changed"];
 const SCANNED_DIRS = ["src", "worker", "panel"];
 const CODE_EXTENSIONS = new Set([".mjs", ".js", ".cjs", ".html", ".css"]);

@@ -113,7 +113,24 @@ test("sync merges the searches by url, cleans strings and drops bad urls", async
     "https://github.com/o/r/pull/2",
   ]);
   const [one, three, two] = snap.items;
-  assert.deepEqual(one, { url: "https://github.com/o/r/pull/1", repo: "o/r", number: 1, title: "t", action: "merge", isDraft: false, author: "me", updatedAt: "2026-11-10T10:00:00Z", mine: true });
+  assert.deepEqual(one, {
+    listed: true,
+    url: "https://github.com/o/r/pull/1",
+    repo: "o/r",
+    number: 1,
+    title: "t",
+    action: "merge",
+    isDraft: false,
+    author: "me",
+    updatedAt: "2026-11-10T10:00:00Z",
+    mine: true,
+    requested: false,
+    headRefOid: null,
+    reviewDecision: null,
+    mergeStateStatus: "CLEAN",
+    checks: "SUCCESS",
+    viewerReview: null,
+  });
   assert.equal(three.action, "review");
   assert.equal(three.mine, false);
   assert.equal(two.title, "evil title");
@@ -217,4 +234,80 @@ test("a throwing readJson does not break creation or sync", async () => {
   const result = await pulls.sync(true);
   assert.deepEqual(result.notable, []);
   assert.equal(pulls.snapshot().items.length, 3);
+});
+
+const HEAD = "a".repeat(40);
+const OLD = "b".repeat(40);
+
+test("normalized items carry requested, head, review and checks fields", async () => {
+  const data = fixture();
+  data.review.nodes[0] = { ...data.review.nodes[0], headRefOid: HEAD, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", viewerLatestReview: { state: "APPROVED", commit: { oid: OLD } } };
+  data.assigned.nodes[1] = data.review.nodes[0];
+  const env = makeEnv(data);
+  const pulls = createPulls(env.deps);
+  await pulls.sync(false);
+  const three = pulls.snapshot().items.find((item) => item.number === 3);
+  assert.equal(three.requested, true);
+  assert.equal(three.headRefOid, HEAD);
+  assert.equal(three.reviewDecision, "APPROVED");
+  assert.equal(three.mergeStateStatus, "CLEAN");
+  assert.equal(three.checks, null);
+  assert.deepEqual(three.viewerReview, { state: "APPROVED", oid: OLD });
+  assert.equal(pulls.snapshot().items.find((item) => item.number === 2).requested, false);
+});
+
+test("the query asks for headRefOid and viewerLatestReview", async () => {
+  const env = makeEnv(fixture());
+  await createPulls(env.deps).sync(false);
+  assert.match(env.calls[0][3], /headRefOid/);
+  assert.match(env.calls[0][3], /viewerLatestReview \{ state commit \{ oid \} \}/);
+});
+
+test("cached merge fields are re-validated on load", () => {
+  const env = makeEnv(fixture());
+  const good = { listed: true, url: "https://github.com/o/r/pull/9", repo: "o/r", number: 9, title: "x", action: "waiting", isDraft: false, author: "bob", updatedAt: "x", mine: false, requested: true, headRefOid: HEAD, reviewDecision: "APPROVED", mergeStateStatus: "CLEAN", checks: "SUCCESS", viewerReview: { state: "APPROVED", oid: HEAD } };
+  const bad = { ...good, url: "https://github.com/o/r/pull/10", number: 10, requested: "yes", headRefOid: "zz", reviewDecision: "approved; rm", mergeStateStatus: 5, checks: {}, viewerReview: { state: "APPROVED", oid: "nope" } };
+  env.store.set("pulls.json", { items: [good, bad], fetchedAt: 1 });
+  const [first, second] = createPulls(env.deps).snapshot().items;
+  assert.deepEqual(first, good);
+  assert.equal(second.requested, false);
+  assert.equal(second.headRefOid, null);
+  assert.equal(second.reviewDecision, null);
+  assert.equal(second.mergeStateStatus, null);
+  assert.equal(second.checks, null);
+  assert.deepEqual(second.viewerReview, { state: "APPROVED", oid: null });
+});
+
+test("PRs found only by reviewed-by are kept but not listed", async () => {
+  const data = fixture();
+  const approved = { ...base, number: 8, url: "https://github.com/o/r/pull/8", author: { login: "bob" } };
+  data.reviewed = { nodes: [approved, data.review.nodes[0]] };
+  const env = makeEnv(data);
+  const pulls = createPulls(env.deps);
+  await pulls.sync(false);
+  assert.match(env.calls[0][3], /reviewed-by:@me/);
+  const items = pulls.snapshot().items;
+  assert.equal(items.find((item) => item.number === 8).listed, false);
+  assert.equal(items.find((item) => item.number === 3).listed, true);
+  assert.equal(items.find((item) => item.number === 1).listed, true);
+});
+
+test("a review without a commit still counts as reviewed", async () => {
+  const data = fixture();
+  data.review.nodes[0] = { ...data.review.nodes[0], viewerLatestReview: { state: "COMMENTED", commit: null } };
+  const env = makeEnv(data);
+  const pulls = createPulls(env.deps);
+  await pulls.sync(false);
+  assert.deepEqual(pulls.snapshot().items.find((item) => item.number === 3).viewerReview, { state: "COMMENTED", oid: null });
+});
+
+test("sync reports fetched only after a successful request", async () => {
+  let fail = false;
+  const data = fixture();
+  const env = makeEnv(() => (fail ? { code: 1, stdout: "", stderr: "boom" } : { code: 0, stdout: JSON.stringify({ data }), stderr: "" }));
+  const pulls = createPulls(env.deps);
+  assert.equal((await pulls.sync(false)).fetched, true);
+  assert.equal((await pulls.sync(false)).fetched, false);
+  fail = true;
+  assert.equal((await pulls.sync(true)).fetched, false);
 });
