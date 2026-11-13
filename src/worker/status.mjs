@@ -35,8 +35,8 @@ export function statusSummary(pulls, limits) {
 
   const parts = ACTIONS.filter((action) => counts[action] > 0).map((action) => `${counts[action]} ${action}`);
   if (unavailable) parts.push(String(pulls.error));
-  if (five !== null) parts.push(`5h ${Math.round(five)}%`);
-  if (seven !== null) parts.push(`7d ${Math.round(seven)}%`);
+  if (five !== null) parts.push(`Current session ${Math.round(five)}%`);
+  if (seven !== null) parts.push(`Current week ${Math.round(seven)}%`);
   const tooltip = (parts.join(", ") || "No pull requests").slice(0, 200);
   return { text, tone, tooltip, icon: ICONS[tone] };
 }

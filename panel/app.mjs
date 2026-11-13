@@ -282,15 +282,14 @@ function limitRow(label, window) {
   const fill = h("div", "fill");
   fill.style.width = `${pct}%`;
   track.append(fill);
-  row.append(h("span", "muted", label), track, h("span", "pct", `${pct}%`));
-  if (window.resetLabel) row.append(h("span", "reset", window.resetLabel));
+  row.append(h("span", "label", label), h("span", "reset", window.resetLabel || ""), track, h("span", "pct", `${pct}%`));
   return row;
 }
 
 function limitsBlock(limits) {
   const block = h("div", "limits");
-  if (limits.fiveHour) block.append(limitRow("5h", limits.fiveHour));
-  if (limits.sevenDay) block.append(limitRow("7d", limits.sevenDay));
+  if (limits.fiveHour) block.append(limitRow("Current session (5 hours)", limits.fiveHour));
+  if (limits.sevenDay) block.append(limitRow("Current week (7 days)", limits.sevenDay));
   if (!limits.fiveHour && !limits.sevenDay) block.append(noteLine(limits.error ? "Plan usage unavailable" : "Loading plan usage…"));
   if (limits.error && (limits.fiveHour || limits.sevenDay)) block.append(noteLine(limits.error, "warn"));
   if (limits.hint) block.append(noteLine(limits.hint));

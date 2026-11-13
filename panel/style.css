@@ -340,15 +340,24 @@ button[aria-pressed="true"] {
 
 .limit {
   display: grid;
-  grid-template-columns: 22px minmax(30px, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
+  column-gap: 6px;
+  row-gap: 3px;
+}
+
+.limit .label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .limit .reset {
-  grid-column: 2 / 4;
   color: var(--pulse-muted);
   font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .track {

@@ -27,7 +27,7 @@ test("tone follows severity", () => {
   assert.equal(statusSummary({ items: [pr("review")] }).tone, "neutral");
 });
 
-test("limits add the 5h percent and raise the tone", () => {
+test("limits add the session percent and raise the tone", () => {
   assert.equal(statusSummary({ items: [] }, limits(72)).text, "No PRs waiting · 72%");
   assert.equal(statusSummary({ items: [] }, limits(72)).tone, "warning");
   assert.equal(statusSummary({ items: [pr("merge")] }, limits(95)).tone, "danger");
@@ -47,4 +47,11 @@ test("output only uses icons and tones Orca accepts", () => {
     assert.ok(icons.has(s.icon) && tones.has(s.tone));
     assert.ok(s.tooltip.length <= 200);
   }
+});
+
+test("the tooltip names the usage windows in words", () => {
+  const tooltip = statusSummary({ items: [] }, limits(10, 40)).tooltip;
+  assert.match(tooltip, /Current session 10%/);
+  assert.match(tooltip, /Current week 40%/);
+  assert.doesNotMatch(tooltip, /\b(5h|7d)\b/);
 });
