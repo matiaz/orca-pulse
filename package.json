@@ -1,0 +1,28 @@
+{
+  "name": "orca-pulse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orca plugin: activity heatmap, pull requests waiting on you, and a git panel for the focused workspace.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matiaz/orca-pulse.git"
+  },
+  "keywords": [
+    "orca",
+    "orca-plugin",
+    "github",
+    "pull-requests",
+    "heatmap",
+    "git",
+    "claude-code"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check-manifest.mjs"
+  }
+}

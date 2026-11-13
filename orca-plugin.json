@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "pulse",
+  "name": "Pulse",
+  "version": "0.1.0",
+  "description": "Activity heatmap, pull requests waiting on you, and a git panel for the focused workspace.",
+  "author": { "name": "matiaz" },
+  "repository": "https://github.com/matiaz/orca-pulse",
+  "license": "MIT",
+  "engines": { "orca": ">=1.4.248" },
+  "pluginApi": 1,
+  "main": "worker/main.mjs",
+  "contributes": {
+    "panels": [{ "id": "pulse", "title": "Pulse", "icon": "activity", "entry": "panel/index.html" }],
+    "commands": [
+      { "id": "pulse.toggle", "title": "Pulse: Toggle sidebar", "action": "sidebar.right.toggle" },
+      { "id": "pulse.refresh", "title": "Pulse: Refresh" }
+    ],
+    "events": [{ "on": "workspace.changed" }, { "on": "workspace.created" }, { "on": "workspace.removed" }, { "on": "agent.status.changed" }],
+    "statusBarItems": [{ "id": "summary", "text": "Pulse", "icon": "activity", "command": "pulse.toggle" }],
+    "settings": [
+      { "key": "claude.planLimits", "title": "Show Claude plan limits", "description": "Reads the Claude Code OAuth token (macOS keychain or ~/.claude/.credentials.json) into memory and sends it only to api.anthropic.com to read your 5-hour and 7-day usage. Never stored or logged.", "type": "boolean", "default": true },
+      { "key": "heatmap.defaultSource", "title": "Heatmap source", "type": "string", "enum": ["github", "claude"], "enumLabels": ["GitHub contributions", "Claude cost"], "default": "github" },
+      { "key": "notifications.prs", "title": "Notify on pull request changes", "description": "Desktop notification when a pull request becomes ready to merge or its CI fails.", "type": "boolean", "default": true },
+      { "key": "git.aiMessages", "title": "AI commit and PR messages", "description": "Sends the staged diff (secret-looking files excluded, 24 KB max) to your local claude CLI when you press message or create pr.", "type": "boolean", "default": true },
+      { "key": "claude.configDir", "title": "Claude config folder", "description": "Leave empty to use ~/.claude.", "type": "string", "default": "" }
+    ]
+  },
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" },
+    { "kind": "agent:launch" },
+    { "kind": "notifications:show" },
+    { "kind": "settings:own" }
+  ]
+}
