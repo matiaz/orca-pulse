@@ -187,8 +187,21 @@ function fakeGit({ roots = ["/r"], status = "## main...origin/main\0", remoteUrl
   return { fn, calls, state };
 }
 
-const graphql = (pr = null, defaultBranch = "main") =>
-  out(JSON.stringify({ data: { repository: { defaultBranchRef: { name: defaultBranch }, ref: { associatedPullRequests: { nodes: pr ? [pr] : [] } } } } }));
+const graphql = (pr = null, defaultBranch = "main", commitState) =>
+  out(
+    JSON.stringify({
+      data: {
+        repository: {
+          defaultBranchRef: { name: defaultBranch },
+          ref: { associatedPullRequests: { nodes: pr ? [pr] : [] } },
+          ...(commitState === undefined ? {} : { object: { statusCheckRollup: commitState ? { state: commitState } : null } }),
+        },
+      },
+    }),
+  );
+
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+const upstreamSha = (sha = SHA) => (cwd, args) => (args[0] === "rev-parse" && args.includes("@{upstream}^{commit}") ? out(`${sha}\n`) : null);
 
 function make(overrides = {}) {
   const fake = fakeGit(overrides.git);
@@ -262,6 +275,51 @@ test("remote info carries the PR and its checks", async () => {
   assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
   assert.ok(args.includes("owner=o") && args.includes("name=r") && args.includes("ref=refs/heads/feat"));
   assert.ok(args.every((a, i) => a !== "-f" || args[i + 1]));
+});
+
+test("without a PR the Git box gets the checks of the latest pushed commit", async () => {
+  const { source, ghCalls } = make({
+    gh: async (args, opts) => (ghCalls.push({ args, opts }), graphql(null, "main", "PENDING")),
+    git: { status: "## feat...origin/feat [ahead 1]\0", respond: upstreamSha() },
+  });
+  await source.sync();
+  await source.idle();
+  const selected = source.snapshot().selected;
+  assert.equal(selected.pr, null);
+  assert.deepEqual(selected.commit, { sha: SHA, url: `https://github.com/o/r/commit/${SHA}/checks`, checks: "running" });
+  const args = ghCalls[0].args;
+  assert.ok(args.includes(`oid=${SHA}`));
+  assert.match(args[args.indexOf("-f") + 1], /object\(oid: \$oid\)/);
+  for (const [state, checks] of [["SUCCESS", "passed"], ["FAILURE", "failed"], ["ERROR", "failed"], ["EXPECTED", "running"]]) {
+    const each = make({ gh: async () => graphql(null, "main", state), git: { status: "## feat...origin/feat\0", respond: upstreamSha() } });
+    await each.source.sync();
+    await each.source.idle();
+    assert.equal(each.source.snapshot().selected.commit.checks, checks);
+  }
+  const unchecked = make({ gh: async () => graphql(null, "main", null), git: { status: "## feat...origin/feat\0", respond: upstreamSha() } });
+  await unchecked.source.sync();
+  await unchecked.source.idle();
+  assert.equal(unchecked.source.snapshot().selected.commit, null);
+  const unpushed = make({ git: { status: "## feat\0", respond: upstreamSha() } });
+  await unpushed.source.sync();
+  await unpushed.source.idle();
+  assert.equal(unpushed.source.snapshot().selected.commit, null);
+  assert.ok(!unpushed.ghCalls[0].args.some((a) => a.startsWith("oid=")));
+  const bogus = make({ gh: async () => graphql(null, "main", "SUCCESS"), git: { status: "## feat...origin/feat\0", respond: upstreamSha("not-a-sha") } });
+  await bogus.source.sync();
+  await bogus.source.idle();
+  assert.equal(bogus.source.snapshot().selected.commit, null);
+});
+
+test("with a PR the Git box keeps the PR and its checks and shows no commit checks", async () => {
+  const pr = { number: 4, url: "https://github.com/o/r/pull/4", commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] } };
+  const { source } = make({ gh: async () => graphql(pr, "main", "FAILURE"), git: { status: "## feat...origin/feat\0", respond: upstreamSha() } });
+  await source.sync();
+  await source.idle();
+  const selected = source.snapshot().selected;
+  assert.deepEqual(selected.pr, { number: 4, url: "https://github.com/o/r/pull/4", checks: "passed" });
+  assert.equal(selected.commit, null);
+  assert.deepEqual(await source.openPrUrl(), { url: "https://github.com/o/r/pull/4" });
 });
 
 test("openPrUrl rejects without a pull request and refuses non-pull urls", async () => {

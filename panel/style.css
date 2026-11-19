@@ -544,6 +544,18 @@ button[aria-pressed="true"] {
   text-decoration: underline;
 }
 
+.link.checks-passed {
+  color: var(--pulse-ok);
+}
+
+.link.checks-running {
+  color: var(--pulse-warn);
+}
+
+.link.checks-failed {
+  color: var(--pulse-bad);
+}
+
 select {
   width: 100%;
   min-width: 0;

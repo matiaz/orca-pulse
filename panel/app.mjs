@@ -28,6 +28,7 @@ const GIT_BUSY_KEYS = { stage: "stageAll", message: "message", commit: "commit",
 const KIND_LETTERS = { modified: "M", added: "A", deleted: "D", renamed: "R", new: "?", conflict: "U" };
 const MARKS = { staged: "●", partial: "◐", unstaged: "○" };
 const MARK_LABELS = { staged: "staged", partial: "partly staged", unstaged: "not staged" };
+const COMMIT_CHECKS = { passed: "✓ checks passed", running: "● checks running", failed: "✗ checks failed" };
 
 function loadUi() {
   const ui = { order: [...IDS], collapsed: {} };
@@ -568,6 +569,15 @@ function buildGit() {
   if (selected.ahead || selected.behind) head.append(h("span", "muted", `↑${selected.ahead} ↓${selected.behind}`));
   if (selected.pr) {
     head.append(button(`PR #${selected.pr.number}${checksText(selected.pr.checks)}`, () => openUrl(selected.pr.url, "git"), { className: "link", aria: `Open pull request ${selected.pr.number}` }));
+  } else if (selected.commit && COMMIT_CHECKS[selected.commit.checks]) {
+    const { commit } = selected;
+    head.append(
+      button(COMMIT_CHECKS[commit.checks], () => openUrl(commit.url, "git"), {
+        className: `link checks-${commit.checks}`,
+        aria: `Open checks for commit ${commit.sha.slice(0, 7)}`,
+        title: `Checks of ${commit.sha.slice(0, 7)}, the latest pushed commit`,
+      }),
+    );
   }
   body.append(head);
 

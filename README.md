@@ -34,7 +34,9 @@ orca plugin install matiaz/orca-pulse
 orca plugin install matiaz/orca-pulse --approve <fingerprint>
 ```
 
-Orca installs the newest `vX.Y.Z` tag, or the default branch if there is none, pinned to the exact commit. Update later with `orca plugin update matiaz.pulse`; an update that asks for new access needs a new approval.
+Orca installs the newest `vX.Y.Z` tag, or the default branch if there is none, pinned to the exact commit. Releases are listed in [CHANGELOG.md](CHANGELOG.md), and `orca plugin list` shows the version you have.
+
+**Updating:** Orca does not update plugins on its own. Run `orca plugin update matiaz.pulse` to move to the newest release tag; an update that asks for new access needs a new approval, printed the same way as on install. Settings and Pulse's state are kept.
 
 **From a clone:**
 
@@ -153,6 +155,8 @@ Shows the GitHub repository of the focused workspace (see [How the focused works
 
 It lists the branch, commits ahead and behind, changed files with their staged state, and the branch's open PR with its check status.
 
+When the branch has no open PR, it shows the CI result of the latest pushed commit (the upstream branch's tip) instead: `✓ checks passed`, `● checks running` or `✗ checks failed`. Clicking it opens that commit's checks on GitHub. Nothing is shown when the branch has no upstream, its commit has no checks, or automatic status is paused for the repository.
+
 | Button | What it does |
 | --- | --- |
 | **stage all** | `git add -A`. |
@@ -167,7 +171,7 @@ Files whose paths look like secrets (`.env*`, keys and certificates such as `*.p
 
 > Pulse runs git with hooks disabled, so `pre-commit`, `commit-msg` and `pre-push` hooks do **not** run for commits and pushes made from the panel. Use a terminal when you need them.
 
-In the background, Pulse reads `git status` every 2 seconds, runs `git fetch --prune origin` every 2 minutes, and looks up the branch's PR every 60 seconds. These automatic git operations never run commands defined by the repository's own git config:
+In the background, Pulse reads `git status` every 2 seconds, runs `git fetch --prune origin` every 2 minutes, and looks up the branch's PR, or the checks of its latest pushed commit, every 60 seconds and right after a push. These automatic git operations never run commands defined by the repository's own git config:
 
 - **Status** is paused for repositories whose local config defines `filter.*` drivers (Git LFS installed with `--local`, for example) or `include` directives. The Git box then shows the branch without the file list. Stage, commit, pull and push still work.
 - **Fetch** runs only when every key in the repository's local config is on a short list of known safe keys (remotes, branch tracking, user name and email, and similar); otherwise it is skipped.
@@ -186,7 +190,7 @@ Buttons you press behave like running git in a terminal. See [SECURITY.md](SECUR
 | --- | --- |
 | git status | 2 s |
 | git fetch | 2 min |
-| branch PR and checks | 60 s |
+| branch PR and checks, or pushed commit checks | 60 s, and right after a push |
 | pull requests | 2 min |
 | Claude transcripts | 30 s |
 | GitHub contributions (today) | 10 min |
@@ -241,7 +245,7 @@ There is no telemetry. What leaves your machine:
 
 | Destination | When | What |
 | --- | --- | --- |
-| GitHub, via `gh` | Every refresh | PR searches, contribution counts, the current branch's PR; `gh pr create` when you press **create pr**; `gh pr merge` when auto merge is on. After you confirm **review**, or when auto review starts one, the Claude Code agent posts reviews, comments and approvals with your `gh` account. |
+| GitHub, via `gh` | Every refresh | PR searches, contribution counts, the current branch's PR and the check status of its latest pushed commit; `gh pr create` when you press **create pr**; `gh pr merge` when auto merge is on. After you confirm **review**, or when auto review starts one, the Claude Code agent posts reviews, comments and approvals with your `gh` account. |
 | Your git remotes, via `git` | Background fetch, **pull**, **push** | Normal git traffic. |
 | Anthropic, via your `claude` CLI | Only when you press **message** or **create pr** | Branch name, file list, commit subjects, the PR template and the diff, with secret-looking files excluded and the diff capped at 24,000 characters. |
 | Anthropic, via the Claude Code agent | When you confirm **review**, or when auto review starts one (on by default) | Whatever the agent reads while reviewing, like any Claude Code session. |

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { privateTmpDir } from "../lib/env.mjs";
-import { capText, clean, cleanMultiline, isPrivatePath, isPullUrl } from "../lib/sanitize.mjs";
+import { capText, clean, cleanMultiline, isGithubUrl, isPrivatePath, isPullUrl } from "../lib/sanitize.mjs";
 import { parseRemote } from "../lib/workspaces.mjs";
 import { describeError, ghGraphql } from "../lib/ghcall.mjs";
 
@@ -98,16 +98,19 @@ export function prArgs(templated) {
   return [...CLAUDE_FLAGS, "--system-prompt", system, "Write the pull request title and description for the branch on stdin."];
 }
 
-const QUERY = `query($owner: String!, $name: String!, $ref: String!) {
+const remoteQuery = (withCommit) => `query($owner: String!, $name: String!, $ref: String!${withCommit ? ", $oid: GitObjectID!" : ""}) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
     ref(qualifiedName: $ref) {
       associatedPullRequests(states: OPEN, first: 1) {
         nodes { number url commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }
       }
-    }
+    }${withCommit ? "\n    object(oid: $oid) { ... on Commit { statusCheckRollup { state } } }" : ""}
   }
 }`;
+const QUERY = remoteQuery(false);
+const COMMIT_QUERY = remoteQuery(true);
+const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const BRANCH_PATTERN = /^[^\s\-~^:?*[\\\u0000-\u001f\u007f][^\s~^:?*[\\\u0000-\u001f\u007f]*$/;
 
@@ -348,7 +351,7 @@ function mapChecks(state) {
   return null;
 }
 
-function normalizeRemote(data) {
+function normalizeRemote(data, slug, sha) {
   const repository = data?.repository;
   if (!repository) throw new Error("unexpected response from gh");
   const name = repository.defaultBranchRef?.name;
@@ -357,7 +360,9 @@ function normalizeRemote(data) {
     node && isPullUrl(node.url) && Number.isSafeInteger(node.number)
       ? { number: node.number, url: node.url, checks: mapChecks(node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state) }
       : null;
-  return { defaultBranch: isSafeBranchName(name) ? name : null, pr };
+  const checks = sha && !pr ? mapChecks(repository.object?.statusCheckRollup?.state) : null;
+  const commit = checks ? { sha, url: `https://github.com/${slug}/commit/${sha}/checks`, checks } : null;
+  return { defaultBranch: isSafeBranchName(name) ? name : null, pr, commit };
 }
 
 export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => false, tmpdir = privateTmpDir } = {}) {
@@ -563,6 +568,11 @@ export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => f
     choose(ws);
   }
 
+  async function pushedSha(cwd) {
+    const sha = (await soft(cwd, ["rev-parse", "--verify", "--quiet", "@{upstream}^{commit}"]))?.trim();
+    return sha && SHA_PATTERN.test(sha) ? sha : null;
+  }
+
   const remoteKey = (cur) => `${cur.path}\0${cur.status.branch ?? ""}`;
 
   async function refreshRemote(cur, gen) {
@@ -576,8 +586,10 @@ export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => f
         return null;
       }
       const [owner, name] = cur.slug.split("/");
-      const data = await ghGraphql(gh, ["-f", `query=${QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `ref=refs/heads/${branch}`]);
-      const info = normalizeRemote(data);
+      const sha = cur.status.upstream ? await pushedSha(cur.path) : null;
+      const query = sha ? ["-f", `query=${COMMIT_QUERY}`, "-f", `oid=${sha}`] : ["-f", `query=${QUERY}`];
+      const data = await ghGraphql(gh, [...query, "-f", `owner=${owner}`, "-f", `name=${name}`, "-f", `ref=refs/heads/${branch}`]);
+      const info = normalizeRemote(data, cur.slug, sha);
       if (gen !== generation) return null;
       remote = { key, at: now(), info };
       remoteFailure = null;
@@ -838,6 +850,7 @@ export function createGit({ git, gh, claude, now = Date.now, aiEnabled = () => f
           more: Math.max(0, status.files.length - MAX_FILES),
           pr: info?.pr ? { number: info.pr.number, url: info.pr.url, checks: info.pr.checks } : null,
           defaultBranch: info?.defaultBranch ? clean(info.defaultBranch, 255) : null,
+          commit: info?.commit && !info.pr && isGithubUrl(info.commit.url) ? { ...info.commit } : null,
         },
       };
     },
