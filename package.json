@@ -1,6 +1,6 @@
 {
   "name": "orca-pulse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Orca plugin: activity heatmap, pull requests waiting on you, and a git panel for the focused workspace.",
   "type": "module",

@@ -4,7 +4,7 @@
   "execution": "trusted-worker",
   "id": "pulse",
   "name": "Pulse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Activity heatmap, pull requests waiting on you, and a git panel for the focused workspace.",
   "author": { "name": "matiaz" },
   "repository": "https://github.com/matiaz/orca-pulse",
